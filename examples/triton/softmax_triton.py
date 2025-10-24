@@ -153,9 +153,6 @@ def matmul(a, b):
         1 )
     
     time_ms = do_bench(lambda: softmax_kernel[grid](c, a, a.stride(0), c.stride(0), a.shape[0], a.shape[1], a.shape[1]))
-    #time_ms = do_bench(lambda: softmax_kernel[grid](c, a, a.stride(0), c.stride(0), a.shape[0], a.shape[1], a.shape[1]))
-    #ptx = triton.compile(softmax_kernel.asm)
-    #print(ptx)
     print(softmax_kernel.best_config)
     print("Runtime: " + str(time_ms))
     return c
@@ -163,8 +160,6 @@ def matmul(a, b):
 
 # Test
 torch.manual_seed(0)
-#a = (torch.rand((512, 512), device=DEVICE, dtype=torch.float32) - 0.5).contiguous()
-#b = (torch.rand((512, 512), device=DEVICE, dtype=torch.float32) - 0.5).contiguous()
 a = (torch.rand((1024, 1024), device=DEVICE, dtype=torch.float32) - 0.5).contiguous()
 b = (torch.rand((1024, 1024), device=DEVICE, dtype=torch.float32) - 0.5).contiguous()
 triton_output = matmul(a, b)
@@ -175,6 +170,3 @@ if torch.allclose(triton_output, torch_output, atol=1e-4, rtol=1e-5):
     print("Test passed! ✅")
 else:
     print("Test failed! ❌")
-
-print(triton_output)
-print(torch_output)

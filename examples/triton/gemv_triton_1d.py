@@ -49,34 +49,59 @@ def gemv_kernel(a_ptr, b_ptr, c_ptr, M, N, BLOCK_SIZE_M: tl.constexpr,
                   BLOCK_SIZE_N: tl.constexpr):
     """
     C = A x B
-    A: (M, N) float32
-    B: (N) float32
-    C: (M) float32
+    A: (M, K) float32
+    B: (K, N) float32
+    C: (M, N) float32
     """
+    # pid: program ID
+    # Corresponds to blockIdx.x in CUDA (axis=0)
+    # Get the maximum number of program IDs: tl.num_programs(axis=0)
+    #pid = tl.program_id(axis=0)
+
+    # Maximum number of program IDs along M and N axes
+    # tl.num_programs(axis=0) = num_pid_m * num_pid_n
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    # Translate 1D pid to 2D (pid_m, pid_n)
+    # An example is shown below. For a more detailed explanation, see `triton.md`.
+    #m\n |  0   1   2   3   4   5         m\n |  0    1    2    3    4    5
+    #----+-----------------------         ----+-----------------------------
+    # 0  |  0   2   4   6   8  10          0  | 0,0  0,1  0,2  0,3  0,4  0,5
+    # 1  |  1   3   5   7   9  11    to    1  | 1,0  1,1  1,2  1,3  1,4  1,5
+    # 2  | 12  14  16  18  20  22          2  | 2,0  2,1  2,2  2,3  2,4  2,5
+    # 3  | 13  15  17  19  21  23          3  | 3,0  3,1  3,2  3,3  3,4  3,5
+    '''
+    GROUP_SIZE = SWIZZLE_N * num_pid_n
+    group_id = pid // GROUP_SIZE
+    group_offs = SWIZZLE_N * group_id
+    pid_m = (pid % SWIZZLE_N) + group_offs
+    group_size_m = min(num_pid_m - group_offs, SWIZZLE_N)
+    pid_n = (pid % GROUP_SIZE) // group_size_m
+
+    tl.assume(pid_m >= 0)
+    tl.assume(pid_n >= 0)
+
+    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    a_ptrs = a_ptr + (offs_am[:, None] * K + offs_k[None, :])
+    b_ptrs = b_ptr + (offs_k[:, None] * N + offs_bn[None, :])
+    '''
 
     pid_m = tl.program_id(axis=0)
 
-    # determine the m-tile
-    offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M # modulo prevents overflow
-    offs_n = tl.arange(0, BLOCK_SIZE_N)
-    a_ptrs = a_ptr + offs_am[:, None] * N + offs_n[None, :]    # 1 column with ptrs to A rows
-    b_ptrs = b_ptr + offs_n
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    acc = tl.zeros((BLOCK_SIZE_M, ), dtype=tl.float32)
 
-    accumulator = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-    # split summation per-element along N
-    for n in range(0, tl.cdiv(N, BLOCK_SIZE_N)):
-        a = tl.load(a_ptrs, mask=offs_n[None, :] < N - n * BLOCK_SIZE_N, other=0.0)    # [None, :] broadcasts 1d array to 2d
-        b = tl.load(b_ptrs, mask=offs_n < N - n * BLOCK_SIZE_N, other=0.0)
-        accumulator += tl.sum(a * b[None, :], axis=1)
-        a_ptrs += BLOCK_SIZE_N
-        b_ptrs += BLOCK_SIZE_N
+    # loop over N in chunks
+    for k in range(0, N, 1):
+        a = tl.load(a_ptr + k, mask=k < N, other=0.0)
+        b = tl.load(b_ptr + k)
+        acc += a * b
 
-    c = accumulator
-
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    c_ptrs = c_ptr + (offs_cm)
-    c_mask = (offs_cm < M)
-    tl.store(c_ptrs, c, mask=c_mask)
+    # write back result
+    tl.store(c_ptr + offs_m, acc, mask=offs_m < M)
 
 
 def gemv(a, b):
@@ -101,6 +126,8 @@ def gemv(a, b):
 
 # Test
 torch.manual_seed(0)
+#a = (torch.rand((512, 512), device=DEVICE, dtype=torch.float32) - 0.5).contiguous()
+#b = (torch.rand((512, 512), device=DEVICE, dtype=torch.float32) - 0.5).contiguous()
 a = (torch.rand((1024, 1024), device=DEVICE, dtype=torch.float32) - 0.5).contiguous()
 b = (torch.rand((1024), device=DEVICE, dtype=torch.float32) - 0.5).contiguous()
 triton_output = gemv(a, b)
